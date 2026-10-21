@@ -51,20 +51,30 @@ rm -rf "$PS5_MW" "$NXP_MW"
 git clone "$MWIFIEX_REPO" "$PS5_MW"
 git -C "$PS5_MW" checkout "$MWIFIEX_REF" 2>/dev/null || true
 git clone --depth 1 --branch "$MWIFIEX_NXP_REF" "$MWIFIEX_NXP_REPO" "$NXP_MW"
-git -C "$NXP_MW" apply "$PS5_MW/ps5-iw620.patch"
-git -C "$NXP_MW" apply "$PS5_MW/ps5-iw620-cmd-timeout-recover.patch"
-git -C "$NXP_MW" apply "$PS5_MW/ps5-iw620-kernel71-compat.patch"
-
-# Build against the kernel source we just built (out-of-tree build needs
-# the in-tree build dir, not just headers; same as install-extmod-build).
-make -C "$NXP_MW" CONFIG_OBJTOOL= KERNELDIR=/src ARCH=x86 -j"$(nproc)"
-[ -f "$NXP_MW/mlan.ko" ] && [ -f "$NXP_MW/moal.ko" ] \
-    || { echo "ERROR: mwifiex build did not produce mlan.ko/moal.ko"; exit 1; }
-
-EXTRA_DIR="/out/staging/lib/modules/$KVER/extra/ps5-iw620"
-mkdir -p "$EXTRA_DIR"
-install -m 0644 "$NXP_MW/mlan.ko" "$EXTRA_DIR/mlan.ko"
-install -m 0644 "$NXP_MW/moal.ko" "$EXTRA_DIR/moal.ko"
+# Units with the MediaTek MT7921 use the in-tree mt7921e driver instead, so a
+# driver that does not build against this kernel yet only drops IW620 Wi-Fi
+# from the image instead of failing the whole build.
+build_iw620() {
+    git -C "$NXP_MW" apply "$PS5_MW/ps5-iw620.patch" &&
+    git -C "$NXP_MW" apply "$PS5_MW/ps5-iw620-cmd-timeout-recover.patch" &&
+    git -C "$NXP_MW" apply "$PS5_MW/ps5-iw620-kernel71-compat.patch" || return 1
+    if [ -f "$PS5_MW/ps5-iw620-kernel72-compat.patch" ]; then
+        git -C "$NXP_MW" apply "$PS5_MW/ps5-iw620-kernel72-compat.patch" || return 1
+    fi
+    # Build against the kernel source we just built (out-of-tree build needs
+    # the in-tree build dir, not just headers; same as install-extmod-build).
+    make -C "$NXP_MW" CONFIG_OBJTOOL= KERNELDIR=/src ARCH=x86 -j"$(nproc)" &&
+    [ -f "$NXP_MW/mlan.ko" ] && [ -f "$NXP_MW/moal.ko" ]
+}
+if build_iw620; then
+    EXTRA_DIR="/out/staging/lib/modules/$KVER/extra/ps5-iw620"
+    mkdir -p "$EXTRA_DIR"
+    install -m 0644 "$NXP_MW/mlan.ko" "$EXTRA_DIR/mlan.ko"
+    install -m 0644 "$NXP_MW/moal.ko" "$EXTRA_DIR/moal.ko"
+else
+    echo "WARNING: the NXP IW620 mwifiex driver does not build against $KVER;"
+    echo "WARNING: the image has no Wi-Fi on IW620 units (MediaTek units are not affected)."
+fi
 
 # Modprobe + modules-load.d so the driver auto-loads at boot.
 mkdir -p /out/staging/etc/modprobe.d /out/staging/etc/modules-load.d
@@ -74,6 +84,17 @@ cat > /out/staging/etc/modprobe.d/moal.conf <<'MPCONF'
 softdep moal pre: cfg80211 mlan
 options moal fw_name=nxp/pcieuartiw620_combo_v1.bin pcie_int_mode=1 drv_mode=1 cfg80211_wext=4 sta_name=mlan ext_scan=1 auto_fw_reload=0 wifi_reset_config=0 sched_scan=0 ps_mode=2 auto_ds=2 amsdu_disable=1
 MPCONF
+
+# udev rules and module options shipped by the patch set (MediaTek MT7921
+# Wi-Fi and Bluetooth), copied next to the kernel tree by build_image.sh.
+if [ -d /src/ps5-system ]; then
+    for f in /src/ps5-system/udev/*.rules; do
+        [ -f "$f" ] && install -Dm644 "$f" "/out/staging/etc/udev/rules.d/$(basename "$f")"
+    done
+    for f in /src/ps5-system/modprobe.d/*.conf; do
+        [ -f "$f" ] && install -Dm644 "$f" "/out/staging/etc/modprobe.d/$(basename "$f")"
+    done
+fi
 
 # Rebuild module index so modprobe moal works without depmod -a post-install.
 depmod -b /out/staging "$KVER"

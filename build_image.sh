@@ -9,7 +9,7 @@ KERNEL_SRC=""
 CLEAN=false
 IMG_SIZE=12000
 KERNEL_ONLY=false
-PATCHES_REF="kernel-7.1.7-56922cf"
+PATCHES_REF="meower"
 
 MULTI_DISTROS="ubuntu2604 arch cachyos"
 
@@ -23,7 +23,7 @@ usage() {
     echo "  --clean      Remove all cached build artifacts and start from scratch"
     echo "  --clean-only Remove all cached build artifacts and exit"
     echo "  --kernel-only  Build and package the kernel only, then exit"
-    echo "  --patches-ref  Branch, tag, or commit SHA for patches (default: v1.2)"
+    echo "  --patches-ref  Branch, tag, or commit SHA for patches (default: $PATCHES_REF)"
     exit 1
 }
 
@@ -42,9 +42,20 @@ while [[ $# -gt 0 ]]; do
 done
 
 LINUX_REPO="https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
+
+# Kernel tag for the patch set, from the "# Linux/x86 X.Y.Z[-rcN] Kernel
+# Configuration" line of its .config. A 7.3.0-rc6 config is built on the final
+# v7.3 tag (mainline tags drop the trailing .0), like ps5-linux-patches'
+# build.sh does with KERNEL_REF=latest.
+linux_branch() {
+    local ver
+    ver="$(sed -nE 's/^# Linux\/[^ ]+ ([0-9]+\.[0-9]+(\.[0-9]+)?)(-rc[0-9]+)? .*/\1/p' "$1" | head -1)"
+    [[ "$ver" =~ ^[0-9]+\.[0-9]+\.0$ ]] && ver="${ver%.0}"
+    echo "v$ver"
+}
 LINUX_DEFAULT_DIR="$SCRIPT_DIR/work/linux"
 
-PATCHES_REPO="https://github.com/ps5-linux/ps5-linux-patches.git"
+PATCHES_REPO="${PATCHES_REPO:-https://github.com/airkingbr/ps5-linux-patches.git}"
 PATCHES_DIR="$SCRIPT_DIR/work/ps5-linux-patches"
 
 if [ -z "$KERNEL_SRC" ]; then
@@ -157,7 +168,7 @@ else
     echo "  Image size:   ${IMG_SIZE}MB"
 fi
 if [ -f "$PATCHES_DIR/.config" ]; then
-    LINUX_BRANCH="v$(sed -nE 's/^# Linux\/[^ ]+ ([0-9]+\.[0-9]+(\.[0-9]+)?) .*/\1/p' "$PATCHES_DIR/.config" | head -1)"
+    LINUX_BRANCH="$(linux_branch "$PATCHES_DIR/.config")"
     echo "  Kernel:       $LINUX_BRANCH"
 else
     echo "  Kernel:       (will fetch)"
@@ -275,7 +286,7 @@ else
                 -v "$(dirname "$dir")":/parent \
                 alpine rm -rf "/parent/$(basename "$dir")"
         done
-        LINUX_BRANCH="v$(sed -nE 's/^# Linux\/[^ ]+ ([0-9]+\.[0-9]+(\.[0-9]+)?) .*/\1/p' "$PATCHES_DIR/.config" | head -1)"
+        LINUX_BRANCH="$(linux_branch "$PATCHES_DIR/.config")"
 
         run_stage "Clone kernel $LINUX_BRANCH" \
             git clone --branch "$LINUX_BRANCH" --depth 1 "$LINUX_REPO" "$LINUX_TMP_DIR"
@@ -291,6 +302,19 @@ else
 
         run_stage "Copy kernel config" \
             cp "$PATCHES_DIR/.config" "$LINUX_TMP_DIR/.config"
+
+        # The kernel builder container only sees the kernel tree (/src), so
+        # copy what the patch set needs next to it: the firmware built into
+        # the kernel (CONFIG_EXTRA_FIRMWARE, relative to the source tree) and
+        # the udev rules and module options in system/.
+        if [ -d "$PATCHES_DIR/firmware" ]; then
+            cp -r "$PATCHES_DIR/firmware" "$LINUX_TMP_DIR/ps5-firmware"
+            sed -i 's|^CONFIG_EXTRA_FIRMWARE_DIR=.*|CONFIG_EXTRA_FIRMWARE_DIR="ps5-firmware"|' \
+                "$LINUX_TMP_DIR/.config"
+        fi
+        if [ -d "$PATCHES_DIR/system" ]; then
+            cp -r "$PATCHES_DIR/system" "$LINUX_TMP_DIR/ps5-system"
+        fi
 
         mv "$LINUX_TMP_DIR" "$LINUX_DEFAULT_DIR"
         KERNEL_SRC="$LINUX_DEFAULT_DIR"
